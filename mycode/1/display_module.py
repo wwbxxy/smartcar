@@ -34,7 +34,7 @@ class Menu:
         self.editing = False       # 是否编辑参数中
         self.need_redraw = True
         self.params = params       # 参数字典引用 (主程序维护)
-
+        self.params_dirty = False  # 参数已改标记 (主循环检测后同步到PID)
     def reset(self):
         """回到根菜单"""
         self.current = self.root
@@ -78,10 +78,12 @@ class Menu:
                     self.need_redraw = True
                 elif kd[1] > 0:     # 下 → 减小
                     self.params[item.param_key] = val - item.step
+                    self.params_dirty = True
                     self.disp.key.clear(2)
                     self.need_redraw = True
             if kd[2] > 0:           # 确认 → 退出编辑
                 self.editing = False
+                self.params_dirty = True
                 self.disp.key.clear(3)
                 self.need_redraw = True
 

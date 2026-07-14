@@ -15,9 +15,9 @@ motor = MOTOR()
 
 # ===== PID 控制器 =====
 # 角度环（外环）：误差=目标角度-当前角度，输出=目标角速度(dps)
-balance_angle_pid = PID_CLASS(kp=300.0, ki=0.0, kd=3.0,  ei_max=0, output_max=2000)
+balance_angle_pid = PID_CLASS(kp=300.0, ki=0.0, kd=3.0,  ei_max=0, output_max=1300)
 # 角速度环（内环）：误差=目标角速度-当前角速度，输出=PWM
-balance_gyro_pid  = PID_CLASS(kp=50.0,  ki=0.0, kd=0.5,  ei_max=0, output_max=3000)
+balance_gyro_pid  = PID_CLASS(kp=50.0,  ki=0.0, kd=0.5,  ei_max=0, output_max=1300)
 
 # ===== 运行状态 =====
 running = False          # 平衡控制是否运行
@@ -58,6 +58,14 @@ def action_run():
     balance_gyro_pid.reset()
     running = True
     screen = "run"
+
+
+def action_status():
+    """进入状态查看界面 (电机不转)"""
+    global screen, running
+    running = False
+    motor.set_duty(0, 0)
+    screen = "status"
 
 
 def action_save():
@@ -110,11 +118,12 @@ def action_cal_imu():
 # ===== 菜单树定义 (改菜单只改这里) =====
 menu_root = MenuItem("MAIN", children=[
     MenuItem("Run",     on_enter=action_run),
+    MenuItem("Status",  on_enter=action_status),
     MenuItem("Params",  children=[
-        MenuItem("T_Angle", param_key="T_Angle", step=0.5),
-        MenuItem("A_Kp",    param_key="A_Kp",    step=10.0),
-        MenuItem("A_Kd",    param_key="A_Kd",    step=0.5),
-        MenuItem("G_Kp",    param_key="G_Kp",    step=5.0),
+        MenuItem("T_Angle", param_key="T_Angle", step=0.2),
+        MenuItem("A_Kp",    param_key="A_Kp",    step=1.0),
+        MenuItem("A_Kd",    param_key="A_Kd",    step=0.1),
+        MenuItem("G_Kp",    param_key="G_Kp",    step=1.0),
         MenuItem("G_Kd",    param_key="G_Kd",    step=0.1),
     ]),
     MenuItem("Save",    on_enter=action_save),
@@ -217,6 +226,10 @@ def handle_status_back():
 while True:
     if screen == "menu":
         menu.process()
+        # 参数有改动 → 同步到 PID 控制器
+        if menu.params_dirty:
+            update_pid_params()
+            menu.params_dirty = False
     elif screen == "status":
         refresh_status(False)
         handle_status_back()
