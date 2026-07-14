@@ -6,7 +6,7 @@ import time, gc, math, os, io
 from pid_module import PID_CLASS
 from imu_module import IMU_FILTER
 from motor_module import MOTOR
-from display_module import DISPLAY
+from display_module import DISPLAY, MenuItem, Menu
 
 # ===== 全局对象 =====
 display = DISPLAY()
@@ -24,6 +24,9 @@ running = False          # 平衡控制是否运行
 current_output = 0.0     # 当前电机输出（供主循环显示）
 display_cnt = 0          # 显示刷新计数
 
+# 屏幕模式: "menu" / "status" / "run"
+screen = "menu"
+
 # ===== 参数系统 =====
 params = {
     "T_Angle": 0.0,      # 目标角度（机械零点）
@@ -33,35 +36,12 @@ params = {
     "G_Kd":    0.5,      # 角速度环 Kd
 }
 
-# 参数调节步长
-steps = {
-    "T_Angle": 0.5,
-    "A_Kp":    10.0,
-    "A_Kd":    0.5,
-    "G_Kp":    5.0,
-    "G_Kd":    0.1,
-}
-
-# ===== 菜单系统 =====
-MENU_MAIN   = 0
-MENU_PARAMS = 1
-MENU_STATUS = 2
-MENU_RUN    = 3
-
-menu_state = MENU_MAIN
-menu_index = 0
-menu_edit = False
-menu_need_redraw = True
-
-main_items  = ["Run", "Params", "Status", "Save", "Load", "CalIMU"]
-param_items = ["T_Angle", "A_Kp", "A_Kd", "G_Kp", "G_Kd", "Back"]
-
 TARGET_ANGLE = 0.0
 
 
 # ===== 参数 ↔ PID 同步 =====
 def update_pid_params():
-    """将 params 字典同步到 PID 控制器和 TARGET_ANGLE"""
+    """将 params 同步到 PID 控制器和 TARGET_ANGLE"""
     global TARGET_ANGLE
     TARGET_ANGLE = params["T_Angle"]
     balance_angle_pid.kp = params["A_Kp"]
@@ -70,8 +50,17 @@ def update_pid_params():
     balance_gyro_pid.kd = params["G_Kd"]
 
 
-def save_params():
-    """保存参数到 /flash/params.txt"""
+# ===== 动作回调 (菜单节点用) =====
+def action_run():
+    """启动平衡控制"""
+    global screen, running
+    balance_angle_pid.reset()
+    balance_gyro_pid.reset()
+    running = True
+    screen = "run"
+
+
+def action_save():
     try:
         os.chdir("/flash")
         with io.open("params.txt", "w") as f:
@@ -84,11 +73,10 @@ def save_params():
         display.show_message("Save FAIL!", display.RED)
         display.beep_error()
         time.sleep_ms(500)
+    menu.need_redraw = True
 
 
-def load_params():
-    """从 /flash/params.txt 加载参数"""
-    global params
+def action_load():
     try:
         os.chdir("/flash")
         with io.open("params.txt", "r") as f:
@@ -108,6 +96,33 @@ def load_params():
         display.show_message("No Save File", display.YELLOW)
         display.beep_error()
         time.sleep_ms(500)
+    menu.need_redraw = True
+
+
+def action_cal_imu():
+    global running
+    running = False
+    motor.set_duty(0, 0)
+    imu_filter.calibrate(5000)
+    menu.need_redraw = True
+
+
+# ===== 菜单树定义 (改菜单只改这里) =====
+menu_root = MenuItem("MAIN", children=[
+    MenuItem("Run",     on_enter=action_run),
+    MenuItem("Params",  children=[
+        MenuItem("T_Angle", param_key="T_Angle", step=0.5),
+        MenuItem("A_Kp",    param_key="A_Kp",    step=10.0),
+        MenuItem("A_Kd",    param_key="A_Kd",    step=0.5),
+        MenuItem("G_Kp",    param_key="G_Kp",    step=5.0),
+        MenuItem("G_Kd",    param_key="G_Kd",    step=0.1),
+    ]),
+    MenuItem("Save",    on_enter=action_save),
+    MenuItem("Load",    on_enter=action_load),
+    MenuItem("CalIMU",  on_enter=action_cal_imu),
+])
+
+menu = Menu(display, menu_root, params)
 
 
 # ===== 上电初始化 =====
@@ -167,157 +182,45 @@ def pit_callback(pit_obj):
 pit = ticker(1)
 pit.callback(pit_callback)
 pit.capture_list(imu_filter.imu, display.key)
-pit.start(5)  # 5ms
+pit.start(5)
 
 
-# ===== 菜单处理函数 =====
-def process_menu():
-    global menu_state, menu_index, menu_edit, menu_need_redraw
-    global running
+# ===== 屏幕刷新辅助 =====
+def refresh_status(running_flag):
+    global display_cnt
+    if display_cnt < 20:
+        return
+    display_cnt = 0
+    gyro_dps = imu_filter.gyro_y * imu_filter.gyro_scale
+    display.show_status(
+        imu_filter.angle, gyro_dps, current_output, running_flag,
+        TARGET_ANGLE,
+        (imu_filter.acc_x, imu_filter.acc_y, imu_filter.acc_z),
+        (imu_filter.gyro_x, imu_filter.gyro_y, imu_filter.gyro_z),
+        imu_filter.calibrated
+    )
 
-    display.key.capture()
-    key_data = display.key.get()
 
-    # ===== 主菜单 =====
-    if menu_state == MENU_MAIN:
-        if key_data[0] > 0:  # 上
-            menu_index = (menu_index - 1) % len(main_items)
-            display.key.clear(1)
-            menu_need_redraw = True
-        elif key_data[1] > 0:  # 下
-            menu_index = (menu_index + 1) % len(main_items)
-            display.key.clear(2)
-            menu_need_redraw = True
-        elif key_data[2] > 0:  # 确认
-            display.key.clear(3)
-            item = main_items[menu_index]
-            if item == "Run":
-                # 启动平衡控制
-                balance_angle_pid.reset()
-                balance_gyro_pid.reset()
-                running = True
-                menu_state = MENU_RUN
-                menu_need_redraw = True
-            elif item == "Params":
-                menu_state = MENU_PARAMS
-                menu_index = 0
-                menu_need_redraw = True
-            elif item == "Status":
-                menu_state = MENU_STATUS
-                menu_need_redraw = True
-            elif item == "Save":
-                save_params()
-                menu_need_redraw = True
-            elif item == "Load":
-                load_params()
-                menu_need_redraw = True
-            elif item == "CalIMU":
-                running = False
-                motor.set_duty(0, 0)
-                imu_filter.calibrate(5000)
-                menu_need_redraw = True
-        elif key_data[3] > 0:  # 返回
-            display.key.clear(4)
-
-        if menu_need_redraw:
-            display.show_menu("main", menu_index, main_items)
-            menu_need_redraw = False
-            time.sleep_ms(50)
-
-    # ===== 参数页面 =====
-    elif menu_state == MENU_PARAMS:
-        items = param_items
-
-        if key_data[3] > 0:  # 返回 → 回主菜单
-            display.key.clear(4)
-            menu_state = MENU_MAIN
-            menu_index = 0
-            menu_edit = False
-            menu_need_redraw = True
-        elif menu_edit:
-            param_key = items[menu_index]
-            current_value = params.get(param_key, 0)
-            step = steps.get(param_key, 1.0)
-            if key_data[0] > 0:  # 上 → 增大
-                params[param_key] = current_value + step
-                display.key.clear(1)
-                update_pid_params()
-                menu_need_redraw = True
-            elif key_data[1] > 0:  # 下 → 减小
-                params[param_key] = current_value - step
-                display.key.clear(2)
-                update_pid_params()
-                menu_need_redraw = True
-            elif key_data[2] > 0:  # 确认 → 退出编辑
-                menu_edit = False
-                display.key.clear(3)
-                menu_need_redraw = True
-        else:
-            if key_data[0] > 0:  # 上
-                menu_index = (menu_index - 1) % len(items)
-                display.key.clear(1)
-                menu_need_redraw = True
-            elif key_data[1] > 0:  # 下
-                menu_index = (menu_index + 1) % len(items)
-                display.key.clear(2)
-                menu_need_redraw = True
-            elif key_data[2] > 0:  # 确认
-                display.key.clear(3)
-                if menu_index == len(items) - 1:  # Back
-                    menu_state = MENU_MAIN
-                    menu_index = 0
-                    menu_need_redraw = True
-                else:
-                    menu_edit = True
-                    menu_need_redraw = True
-
-        if menu_need_redraw:
-            display.show_menu("params", menu_index, items, params, menu_edit)
-            menu_need_redraw = False
-            time.sleep_ms(50)
-
-    # ===== 状态查看（电机不转）=====
-    elif menu_state == MENU_STATUS:
-        if key_data[3] > 0:  # 返回
-            display.key.clear(4)
-            menu_state = MENU_MAIN
-            menu_index = 0
-            menu_need_redraw = True
-
-        if display_cnt >= 20:  # 每100ms刷新
-            display_cnt = 0
-            gyro_dps = imu_filter.gyro_y * imu_filter.gyro_scale
-            display.show_status(
-                imu_filter.angle, gyro_dps, current_output, False,
-                TARGET_ANGLE,
-                (imu_filter.acc_x, imu_filter.acc_y, imu_filter.acc_z),
-                (imu_filter.gyro_x, imu_filter.gyro_y, imu_filter.gyro_z),
-                imu_filter.calibrated
-            )
-
-    # ===== 运行界面（平衡控制中）=====
-    elif menu_state == MENU_RUN:
-        if key_data[3] > 0:  # 返回 → 停车
-            display.key.clear(4)
-            running = False
-            motor.set_duty(0, 0)
-            menu_state = MENU_MAIN
-            menu_index = 0
-            menu_need_redraw = True
-
-        if display_cnt >= 20:  # 每100ms刷新
-            display_cnt = 0
-            gyro_dps = imu_filter.gyro_y * imu_filter.gyro_scale
-            display.show_status(
-                imu_filter.angle, gyro_dps, current_output, True,
-                TARGET_ANGLE,
-                (imu_filter.acc_x, imu_filter.acc_y, imu_filter.acc_z),
-                (imu_filter.gyro_x, imu_filter.gyro_y, imu_filter.gyro_z),
-                imu_filter.calibrated
-            )
+def handle_status_back():
+    """status/run 界面按返回键"""
+    global screen, running
+    kd = display.key.get()
+    if kd[3] > 0:
+        display.key.clear(4)
+        running = False
+        motor.set_duty(0, 0)
+        screen = "menu"
+        menu.need_redraw = True
 
 
 # ===== 主循环 =====
 while True:
-    process_menu()
+    if screen == "menu":
+        menu.process()
+    elif screen == "status":
+        refresh_status(False)
+        handle_status_back()
+    elif screen == "run":
+        refresh_status(True)
+        handle_status_back()
     gc.collect()
