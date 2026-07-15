@@ -25,7 +25,7 @@ class IMU_FILTER:
         self.acc_scale = 1.0 / 4096.0  # 原始值转g
 
         # 互补滤波系数
-        self.K = 0.98  # 陀螺仪权重
+        self.K = 0.96  # 陀螺仪权重
         self.dt = 0.005  # 采样周期(s)，需与ticker周期一致
 
         # 零漂校准值
@@ -34,7 +34,12 @@ class IMU_FILTER:
         self.gyro_offset_z = 0
 
         # 死区阈值（小于这个值视为 0）
-        self.dead_zone = 8
+        self.dead_zone = 15
+
+        # 陀螺仪一阶低通滤波(抑制高频噪声,防止轮子抖动)
+        self.gyro_filter_k = 0.6   # 滤波系数 0~1, 越小滤波越强
+        self.gyro_y_filt = 0.0     # 滤波后的Y轴角速度(用于PID和角度积分)
+        self.gyro_y_filt_last = 0.0
 
         # 校准是否完成
         self.calibrated = False
@@ -129,6 +134,10 @@ class IMU_FILTER:
         if abs(self.gyro_z) <= self.dead_zone:
             self.gyro_z = 0
 
+        # 陀螺仪Y轴一阶低通滤波(抑制高频噪声,防止轮子抖动)
+        self.gyro_y_filt_last = self.gyro_y_filt
+        self.gyro_y_filt = self.gyro_filter_k * self.gyro_y + (1.0 - self.gyro_filter_k) * self.gyro_y_filt
+
         #互补滤波
 
         # 加速度计计算角度（atan2返回弧度，转为度）
@@ -137,6 +146,6 @@ class IMU_FILTER:
         angle_acc_rad = math.atan2(self.acc_x, self.acc_z)
         self.angle_acc = angle_acc_rad * 180.0 / math.pi
 
-        # 陀螺仪积分（gyro_y转dps，再乘dt得到角度增量）
-        gyro_dps = self.gyro_y * self.gyro_scale
+        # 陀螺仪积分（用滤波后的gyro_y，转dps，再乘dt得到角度增量）
+        gyro_dps = self.gyro_y_filt * self.gyro_scale
         self.angle = self.K * (self.angle + gyro_dps * self.dt) + (1.0 - self.K) * self.angle_acc

@@ -74,6 +74,7 @@ class Menu:
                 val = self.params.get(item.param_key, 0)
                 if kd[0] > 0:       # 上 → 增大
                     self.params[item.param_key] = val + item.step
+                    self.params_dirty = True
                     self.disp.key.clear(1)
                     self.need_redraw = True
                 elif kd[1] > 0:     # 下 → 减小
