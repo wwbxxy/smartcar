@@ -7,37 +7,54 @@ from pid_module import PID_CLASS
 from imu_module import IMU_FILTER
 from motor_module import MOTOR
 from display_module import DISPLAY, MenuItem, Menu
+from ccd_module import CCD
 
 # ===== 全局对象 =====
 display = DISPLAY()
 imu_filter = IMU_FILTER(lcd=display.lcd, beep=display.beep)
 motor = MOTOR()
 
+# ===== CCD 初始化 =====
+# TSL1401(1) 使用 SPI1, 两路CCD: get(2)=近, get(1)=中
+ccd_hw = TSL1401(1)
+ccd_hw.set_resolution(TSL1401.RES_8BIT)
+ccd_near = CCD(ccd_hw, 2)   # 近CCD (主巡线)
+ccd_mid  = CCD(ccd_hw, 1)   # 中CCD (辅助/前瞻)
+
 # ===== PID 控制器 =====
 # 角度环（外环）：误差=目标角度-当前角度，输出=目标角速度(dps)
-# ei_max 限制积分累积，防止积分饱和（外环输出限到±500 dps）
-balance_angle_pid = PID_CLASS(kp=300.0, ki=0.0, kd=3.0,  ei_max=500, output_max=2000)
+balance_angle_pid = PID_CLASS(kp=-4.0, ki=0.0, kd=-8.0,  ei_max=500, output_max=2000)
 # 角速度环（内环）：误差=目标角速度-当前角速度，输出=PWM
-# ei_max 限制积分累积（内环输出限到±800 PWM）
-balance_gyro_pid  = PID_CLASS(kp=50.0,  ki=0.0, kd=0.5,  ei_max=800, output_max=2000)
+balance_gyro_pid  = PID_CLASS(kp=-17.0,  ki=-0.5, kd=0.0,  ei_max=800, output_max=2000)
+# 方向环（PD）：误差=CCD中点偏差，输出=转向PWM差值
+direction_pid = PID_CLASS(kp=0.0, ki=0.0, kd=0.0, ei_max=0, output_max=2000)
 
 # ===== 运行状态 =====
 running = False          # 平衡控制是否运行
-current_output = 0.0     # 当前电机输出（供主循环显示）
+current_output = 0.0     # 当前平衡PWM（供显示）
+turn_pwm = 0             # 当前转向PWM（方向环输出, ticker读取）
 display_cnt = 0          # 显示刷新计数
+ccd_flag = False         # CCD 10ms采集完成标志
+ccd_enable = False       # 方向控制是否启用 (run模式下自动开启)
 
-# 屏幕模式: "menu" / "status" / "run"
+# 屏幕模式: "menu" / "status" / "run" / "ccd"
 screen = "menu"
 
 # ===== 参数系统 =====
 params = {
     "T_Angle": 0.0,      # 目标角度（机械零点）
-    "A_Kp":    300.0,    # 角度环 Kp
+    "A_Kp":    -4.0,    # 角度环 Kp
     "A_Ki":    0.0,      # 角度环 Ki
-    "A_Kd":    3.0,      # 角度环 Kd
-    "G_Kp":    50.0,     # 角速度环 Kp
-    "G_Ki":    0.0,      # 角速度环 Ki
-    "G_Kd":    0.5,      # 角速度环 Kd
+    "A_Kd":    -8.0,     # 角度环 Kd
+    "G_Kp":    -17.0,     # 角速度环 Kp
+    "G_Ki":    -0.5,      # 角速度环 Ki
+    "G_Kd":    0.0,      # 角速度环 Kd
+    "D_Kp":    80.0,      # 方向环 Kp (CCD误差→转向PWM)
+    "D_Kd":    0.0,       # 方向环 Kd
+    "Turn_Max": 3000,     # 转向PWM限幅
+    "CCD_ThMax": 40,      # CCD二值化阈值上限
+    "CCD_ThMin": 10,      # CCD二值化阈值下限
+    "CCD_Prot":  12,      # CCD保护阈值(低于此值冲出赛道)
 }
 
 TARGET_ANGLE = 0.0
@@ -54,14 +71,26 @@ def update_pid_params():
     balance_gyro_pid.kp = params["G_Kp"]
     balance_gyro_pid.ki = params["G_Ki"]
     balance_gyro_pid.kd = params["G_Kd"]
+    # 方向环
+    direction_pid.kp = params["D_Kp"]
+    direction_pid.kd = params["D_Kd"]
+    direction_pid.output_max = params["Turn_Max"]
+    # CCD参数
+    for c in (ccd_near, ccd_mid):
+        c.threshold_max = int(params["CCD_ThMax"])
+        c.threshold_min = int(params["CCD_ThMin"])
+        c.protect_value = int(params["CCD_Prot"])
 
 
 # ===== 动作回调 (菜单节点用) =====
 def action_run():
     """启动平衡控制"""
-    global screen, running
+    global screen, running, turn_pwm, ccd_enable
     balance_angle_pid.reset()
     balance_gyro_pid.reset()
+    direction_pid.reset()
+    turn_pwm = 0
+    ccd_enable = True       # run模式下开启CCD方向控制
     running = True
     screen = "run"
 
@@ -121,10 +150,20 @@ def action_cal_imu():
     menu.need_redraw = True
 
 
+def action_ccd():
+    """进入CCD查看界面 (电机不转, 实时看CCD波形)"""
+    global screen, running, ccd_enable
+    running = False
+    ccd_enable = False
+    motor.set_duty(0, 0)
+    screen = "ccd"
+
+
 # ===== 菜单树定义 (改菜单只改这里) =====
 menu_root = MenuItem("MAIN", children=[
     MenuItem("Run",     on_enter=action_run),
     MenuItem("Status",  on_enter=action_status),
+    MenuItem("CCD",     on_enter=action_ccd),
     MenuItem("Params",  children=[
         MenuItem("T_Angle", param_key="T_Angle", step=0.1),
         MenuItem("A_Kp",    param_key="A_Kp",    step=0.5),
@@ -133,6 +172,16 @@ menu_root = MenuItem("MAIN", children=[
         MenuItem("G_Kp",    param_key="G_Kp",    step=0.5),
         MenuItem("G_Ki",    param_key="G_Ki",    step=0.1),
         MenuItem("G_Kd",    param_key="G_Kd",    step=0.5),
+    ]),
+    MenuItem("DirParams", children=[
+        MenuItem("D_Kp",     param_key="D_Kp",     step=5.0),
+        MenuItem("D_Kd",     param_key="D_Kd",     step=1.0),
+        MenuItem("Turn_Max", param_key="Turn_Max", step=100),
+    ]),
+    MenuItem("CCDParams", children=[
+        MenuItem("CCD_ThMax", param_key="CCD_ThMax", step=1.0),
+        MenuItem("CCD_ThMin", param_key="CCD_ThMin", step=1.0),
+        MenuItem("CCD_Prot",  param_key="CCD_Prot",  step=1.0),
     ]),
     MenuItem("Save",    on_enter=action_save),
     MenuItem("Load",    on_enter=action_load),
@@ -177,7 +226,7 @@ def pit_callback(pit_obj):
         target_gyro = balance_angle_pid.pid_standard_integral(angle_err)
 
         # --- 角速度环（内环）---
-        gyro_dps = imu_filter.gyro_y * imu_filter.gyro_scale
+        gyro_dps = imu_filter.gyro_y_filt * imu_filter.gyro_scale
         gyro_err = target_gyro - gyro_dps
         output = balance_gyro_pid.pid_standard_integral(gyro_err)
 
@@ -188,18 +237,32 @@ def pit_callback(pit_obj):
             output = -10000
 
         current_output = output
-        motor.set_duty(int(output), int(output))
+        # 平衡PWM叠加转向PWM (左减右加实现差速转向, 符号需按实际接线调试)
+        motor.set_duty(int(output - turn_pwm), int(output + turn_pwm))
     else:
         current_output = 0.0
 
     display_cnt += 1
 
 
+# ===== CCD 10ms ticker 回调 =====
+def ccd_callback(pit_obj):
+    global ccd_flag
+    ccd_flag = True
+
+
 # ===== 初始化 ticker =====
+# 5ms: IMU + 平衡控制 + 按键采集
 pit = ticker(1)
 pit.callback(pit_callback)
 pit.capture_list(imu_filter.imu, display.key)
 pit.start(5)
+
+# 10ms: CCD自动采集 (数据处理在主循环, 避免阻塞中断)
+pit_ccd = ticker(2)
+pit_ccd.callback(ccd_callback)
+pit_ccd.capture_list(ccd_hw)
+pit_ccd.start(10)
 
 
 # ===== 屏幕刷新辅助 =====
@@ -208,7 +271,7 @@ def refresh_status(running_flag):
     if display_cnt < 20:
         return
     display_cnt = 0
-    gyro_dps = imu_filter.gyro_y * imu_filter.gyro_scale
+    gyro_dps = imu_filter.gyro_y_filt * imu_filter.gyro_scale
     display.show_status(
         imu_filter.angle, gyro_dps, current_output, running_flag,
         TARGET_ANGLE,
@@ -219,19 +282,62 @@ def refresh_status(running_flag):
 
 
 def handle_status_back():
-    """status/run 界面按返回键"""
-    global screen, running
+    """status/run/ccd 界面按返回键"""
+    global screen, running, ccd_enable, turn_pwm
     kd = display.key.get()
     if kd[3] > 0:
         display.key.clear(4)
         running = False
+        ccd_enable = False
+        turn_pwm = 0
         motor.set_duty(0, 0)
         screen = "menu"
         menu.need_redraw = True
 
 
+# ===== CCD 颜色字典 (供 CCD.draw 使用) =====
+ccd_colors = {
+    'YELLOW': display.YELLOW,
+    'RED':    display.RED,
+    'GREEN':  display.GREEN,
+    'BLUE':   display.BLUE,
+    'WHITE':  display.WHITE,
+}
+
+
+def refresh_ccd():
+    """CCD查看界面: 实时显示两路CCD波形与边界"""
+    lcd = display.lcd
+    lcd.clear(display.BLACK)
+    lcd.str16(0, 0, "-- CCD VIEW --", display.CYAN)
+
+    # 近CCD (上方) + 中CCD (下方)
+    ccd_near.draw(lcd, 20,  "CCD0-NEAR", ccd_colors)
+    ccd_mid.draw(lcd, 120, "CCD1-MID",  ccd_colors)
+
+    # 底部汇总
+    err = ccd_near.err
+    valid = "OK" if ccd_near.is_valid() else "LOST!"
+    lcd.str16(0, 230, "Err:{:3d}  {}".format(err, valid), display.YELLOW)
+    lcd.str16(0, 250, "[Back] Menu", display.WHITE)
+
+
 # ===== 主循环 =====
 while True:
+    # --- CCD 数据处理 (10ms周期, 所有模式都更新方便查看) ---
+    if ccd_flag:
+        ccd_flag = False
+        ccd_near.update()
+        ccd_mid.update()
+        # 方向控制 (仅run模式且CCD有效时)
+        if ccd_enable and running:
+            if ccd_near.is_valid():
+                turn_pwm = direction_pid.pid_standard_integral(ccd_near.err)
+            else:
+                turn_pwm = 0   # 冲出赛道, 停止转向
+        else:
+            turn_pwm = 0
+
     if screen == "menu":
         menu.process()
         # 参数有改动 → 同步到 PID 控制器
@@ -243,5 +349,8 @@ while True:
         handle_status_back()
     elif screen == "run":
         refresh_status(True)
+        handle_status_back()
+    elif screen == "ccd":
+        refresh_ccd()
         handle_status_back()
     gc.collect()
