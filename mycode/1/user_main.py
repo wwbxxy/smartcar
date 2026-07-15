@@ -15,9 +15,11 @@ motor = MOTOR()
 
 # ===== PID 控制器 =====
 # 角度环（外环）：误差=目标角度-当前角度，输出=目标角速度(dps)
-balance_angle_pid = PID_CLASS(kp=300.0, ki=0.0, kd=3.0,  ei_max=0, output_max=1300)
+# ei_max 限制积分累积，防止积分饱和（外环输出限到±500 dps）
+balance_angle_pid = PID_CLASS(kp=300.0, ki=0.0, kd=3.0,  ei_max=500, output_max=2000)
 # 角速度环（内环）：误差=目标角速度-当前角速度，输出=PWM
-balance_gyro_pid  = PID_CLASS(kp=50.0,  ki=0.0, kd=0.5,  ei_max=0, output_max=1300)
+# ei_max 限制积分累积（内环输出限到±800 PWM）
+balance_gyro_pid  = PID_CLASS(kp=50.0,  ki=0.0, kd=0.5,  ei_max=800, output_max=2000)
 
 # ===== 运行状态 =====
 running = False          # 平衡控制是否运行
@@ -31,8 +33,10 @@ screen = "menu"
 params = {
     "T_Angle": 0.0,      # 目标角度（机械零点）
     "A_Kp":    300.0,    # 角度环 Kp
+    "A_Ki":    0.0,      # 角度环 Ki
     "A_Kd":    3.0,      # 角度环 Kd
     "G_Kp":    50.0,     # 角速度环 Kp
+    "G_Ki":    0.0,      # 角速度环 Ki
     "G_Kd":    0.5,      # 角速度环 Kd
 }
 
@@ -45,8 +49,10 @@ def update_pid_params():
     global TARGET_ANGLE
     TARGET_ANGLE = params["T_Angle"]
     balance_angle_pid.kp = params["A_Kp"]
+    balance_angle_pid.ki = params["A_Ki"]
     balance_angle_pid.kd = params["A_Kd"]
     balance_gyro_pid.kp = params["G_Kp"]
+    balance_gyro_pid.ki = params["G_Ki"]
     balance_gyro_pid.kd = params["G_Kd"]
 
 
@@ -120,11 +126,13 @@ menu_root = MenuItem("MAIN", children=[
     MenuItem("Run",     on_enter=action_run),
     MenuItem("Status",  on_enter=action_status),
     MenuItem("Params",  children=[
-        MenuItem("T_Angle", param_key="T_Angle", step=0.2),
-        MenuItem("A_Kp",    param_key="A_Kp",    step=1.0),
-        MenuItem("A_Kd",    param_key="A_Kd",    step=0.1),
-        MenuItem("G_Kp",    param_key="G_Kp",    step=1.0),
-        MenuItem("G_Kd",    param_key="G_Kd",    step=0.1),
+        MenuItem("T_Angle", param_key="T_Angle", step=0.1),
+        MenuItem("A_Kp",    param_key="A_Kp",    step=0.5),
+        MenuItem("A_Ki",    param_key="A_Ki",    step=0.1),
+        MenuItem("A_Kd",    param_key="A_Kd",    step=0.5),
+        MenuItem("G_Kp",    param_key="G_Kp",    step=0.5),
+        MenuItem("G_Ki",    param_key="G_Ki",    step=0.1),
+        MenuItem("G_Kd",    param_key="G_Kd",    step=0.5),
     ]),
     MenuItem("Save",    on_enter=action_save),
     MenuItem("Load",    on_enter=action_load),
