@@ -41,7 +41,7 @@ class CCD:
 
         # ===== 可调参数 (通过菜单修改) =====
         # 二值化阈值上下限 (动态阈值会被限制到此范围)
-        self.threshold_max = 40
+        self.threshold_max = 100
         self.threshold_min = 10
         # 非法边界范围 (边界落在 [0, inv_range] 或 [127-inv_range, 127] 视为丢失)
         self.inv_range = 10

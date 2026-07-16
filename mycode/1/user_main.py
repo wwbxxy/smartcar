@@ -23,11 +23,11 @@ except Exception as e:
 motor = MOTOR()
 
 # ===== CCD 初始化 =====
-# TSL1401(1) 使用 SPI1, 两路CCD: get(2)=近, get(1)=中
+
 ccd_hw = TSL1401(1)
 ccd_hw.set_resolution(TSL1401.RES_8BIT)
-ccd_near = CCD(ccd_hw, 2)   # 近CCD (主巡线)
-ccd_mid  = CCD(ccd_hw, 1)   # 中CCD (辅助/前瞻)
+ccd_near = CCD(ccd_hw, 0)   # CCD1接口 (主巡线)
+ccd_mid  = None              # 没有第二个CCD, 置None
 
 # ===== PID 控制器 =====
 # 角度环（外环）：误差=目标角度-当前角度，输出=目标角速度(dps)
@@ -60,7 +60,7 @@ params = {
     "D_Kp":    80.0,      # 方向环 Kp (CCD误差→转向PWM)
     "D_Kd":    0.0,       # 方向环 Kd
     "Turn_Max": 3000,     # 转向PWM限幅
-    "CCD_ThMax": 40,      # CCD二值化阈值上限
+    "CCD_ThMax": 100,      # CCD二值化阈值上限
     "CCD_ThMin": 10,      # CCD二值化阈值下限
     "CCD_Prot":  12,      # CCD保护阈值(低于此值冲出赛道)
 }
@@ -83,11 +83,12 @@ def update_pid_params():
     direction_pid.kp = params["D_Kp"]
     direction_pid.kd = params["D_Kd"]
     direction_pid.output_max = params["Turn_Max"]
-    # CCD参数
+    # CCD参数 (只更新存在的CCD)
     for c in (ccd_near, ccd_mid):
-        c.threshold_max = int(params["CCD_ThMax"])
-        c.threshold_min = int(params["CCD_ThMin"])
-        c.protect_value = int(params["CCD_Prot"])
+        if c is not None:
+            c.threshold_max = int(params["CCD_ThMax"])
+            c.threshold_min = int(params["CCD_ThMin"])
+            c.protect_value = int(params["CCD_Prot"])
 
 
 # ===== 动作回调 (菜单节点用) =====
@@ -281,7 +282,7 @@ debug = DEBUG(params, update_cb=update_pid_params)
 debug.attach_imu(imu_filter)
 debug.attach_motor(motor)
 debug.attach_pid(balance_angle_pid, balance_gyro_pid, direction_pid)
-debug.attach_ccd(ccd_near, ccd_mid)
+debug.attach_ccd(ccd_near, ccd_mid)  # ccd_mid=None, debug内部已处理
 
 
 def sync_debug_running():
@@ -346,14 +347,17 @@ ccd_colors = {
 
 
 def refresh_ccd():
-    """CCD查看界面: 实时显示两路CCD波形与边界"""
+    """CCD查看界面: 实时显示CCD波形与边界"""
     lcd = display.lcd
     lcd.clear(display.BLACK)
     lcd.str16(0, 0, "-- CCD VIEW --", display.CYAN)
 
-    # 近CCD (上方) + 中CCD (下方)
-    ccd_near.draw(lcd, 20,  "CCD0-NEAR", ccd_colors)
-    ccd_mid.draw(lcd, 120, "CCD1-MID",  ccd_colors)
+    # CCD1 (上方)
+    ccd_near.draw(lcd, 20, "CCD1", ccd_colors)
+
+    # 第二路CCD (下方, 若存在)
+    if ccd_mid is not None:
+        ccd_mid.draw(lcd, 120, "CCD2", ccd_colors)
 
     # 底部汇总
     err = ccd_near.err
@@ -368,7 +372,8 @@ while True:
     if ccd_flag:
         ccd_flag = False
         ccd_near.update()
-        ccd_mid.update()
+        if ccd_mid is not None:
+            ccd_mid.update()
         # 方向控制 (仅run模式且CCD有效时)
         if ccd_enable and running:
             if ccd_near.is_valid():
