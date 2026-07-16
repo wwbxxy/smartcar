@@ -8,10 +8,18 @@ from imu_module import IMU_FILTER
 from motor_module import MOTOR
 from display_module import DISPLAY, MenuItem, Menu
 from ccd_module import CCD
+from debug_module import DEBUG
 
 # ===== 全局对象 =====
-display = DISPLAY()
-imu_filter = IMU_FILTER(lcd=display.lcd, beep=display.beep)
+# 屏幕可能坏了, 初始化加容错
+display = None
+try:
+    display = DISPLAY()
+    imu_filter = IMU_FILTER(lcd=display.lcd, beep=display.beep)
+except Exception as e:
+    print("[WARN] 屏幕初始化失败: {}, 将使用串口调试".format(e))
+    # 无屏幕时IMU单独初始化 (不依赖LCD/蜂鸣器)
+    imu_filter = IMU_FILTER()
 motor = MOTOR()
 
 # ===== CCD 初始化 =====
@@ -252,10 +260,13 @@ def ccd_callback(pit_obj):
 
 
 # ===== 初始化 ticker =====
-# 5ms: IMU + 平衡控制 + 按键采集
+# 5ms: IMU + 平衡控制 (+ 按键采集, 屏幕可用时)
 pit = ticker(1)
 pit.callback(pit_callback)
-pit.capture_list(imu_filter.imu, display.key)
+if display is not None:
+    pit.capture_list(imu_filter.imu, display.key)
+else:
+    pit.capture_list(imu_filter.imu)
 pit.start(5)
 
 # 10ms: CCD自动采集 (数据处理在主循环, 避免阻塞中断)
@@ -263,6 +274,35 @@ pit_ccd = ticker(2)
 pit_ccd.callback(ccd_callback)
 pit_ccd.capture_list(ccd_hw)
 pit_ccd.start(10)
+
+
+# ===== 串口调试系统初始化 =====
+debug = DEBUG(params, update_cb=update_pid_params)
+debug.attach_imu(imu_filter)
+debug.attach_motor(motor)
+debug.attach_pid(balance_angle_pid, balance_gyro_pid, direction_pid)
+debug.attach_ccd(ccd_near, ccd_mid)
+
+
+def sync_debug_running():
+    """同步debug的running状态到全局running"""
+    global running, turn_pwm, ccd_enable
+    if debug.running != running:
+        running = debug.running
+        if running:
+            turn_pwm = 0
+            ccd_enable = True
+        else:
+            turn_pwm = 0
+            ccd_enable = False
+            motor.set_duty(0, 0)
+
+
+print("=" * 50)
+print("平衡车调试系统已启动")
+print("屏幕状态: {}".format("正常" if display else "不可用(串口模式)"))
+print("输入 help 查看可用命令")
+print("=" * 50)
 
 
 # ===== 屏幕刷新辅助 =====
@@ -338,19 +378,29 @@ while True:
         else:
             turn_pwm = 0
 
-    if screen == "menu":
-        menu.process()
-        # 参数有改动 → 同步到 PID 控制器
-        if menu.params_dirty:
-            update_pid_params()
-            menu.params_dirty = False
-    elif screen == "status":
-        refresh_status(False)
-        handle_status_back()
-    elif screen == "run":
-        refresh_status(True)
-        handle_status_back()
-    elif screen == "ccd":
-        refresh_ccd()
-        handle_status_back()
+    # --- 串口调试 (始终运行) ---
+    debug.process()                  # 处理命令行输入
+    sync_debug_running()             # 同步running状态
+    debug.set_running(running)       # 回同步状态给debug
+    debug.print_status()             # 周期打印状态 (10Hz)
+    debug.print_ccd()                # 周期打印CCD (5Hz, 需ccd命令开启)
+
+    # --- 屏幕交互 (屏幕可用时) ---
+    if display is not None:
+        if screen == "menu":
+            menu.process()
+            # 参数有改动 → 同步到 PID 控制器
+            if menu.params_dirty:
+                update_pid_params()
+                menu.params_dirty = False
+        elif screen == "status":
+            refresh_status(False)
+            handle_status_back()
+        elif screen == "run":
+            refresh_status(True)
+            handle_status_back()
+        elif screen == "ccd":
+            refresh_ccd()
+            handle_status_back()
+
     gc.collect()
